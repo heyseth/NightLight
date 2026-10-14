@@ -18,7 +18,7 @@ LOG=/mnt/SDCARD/Saves/spruce/nightlight.log
     -pyUiConfig /mnt/SDCARD/App/PyUI/py-ui-config.json \
     -cfwConfig /mnt/SDCARD/Saves/spruce/spruce-config.json \
     -optionListFile nightlight \
-    -optionListTitle 'NIGHT LIGHT'
+    -optionListTitle 'Night Light'
   result=$?
   echo "Exit status: $result"
   echo '=== End ==='

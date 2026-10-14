@@ -1,4 +1,5 @@
 import sys
+import threading
 import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
@@ -14,6 +15,44 @@ def module(name, **attributes):
 
 
 class MenuTests(unittest.TestCase):
+    def test_display_discovery_overlaps_imports_and_finishes_before_return(self):
+        discovery_started = threading.Event()
+        imports_started = threading.Event()
+        discovery_finished = threading.Event()
+        runtime = module('mainui')
+
+        def discover():
+            discovery_started.set()
+            if not imports_started.wait(timeout=2):
+                raise AssertionError('Imports did not overlap display discovery')
+            discovery_finished.set()
+            return (1, 2, 1024)
+
+        def import_runtime(name):
+            self.assertEqual(name, 'mainui')
+            self.assertTrue(discovery_started.wait(timeout=2))
+            imports_started.set()
+            return runtime
+
+        with patch.object(native_menu, 'discover_crtc', side_effect=discover), \
+                patch.object(native_menu.importlib, 'import_module', side_effect=import_runtime):
+            result = native_menu.load_runtime()
+        self.assertEqual(result, (runtime, (1, 2, 1024)))
+        self.assertTrue(discovery_finished.is_set())
+
+    def test_display_discovery_failure_prevents_ui_startup(self):
+        runtime = module('mainui', main=Mock())
+        with patch.dict(sys.modules, {'mainui': runtime}), \
+                patch.object(native_menu, 'MAIN_PY') as path, \
+                patch.object(native_menu, 'load_settings', return_value=dict(DEFAULT)), \
+                patch.object(native_menu, 'discover_crtc', side_effect=RuntimeError('No CRTC')), \
+                patch.object(sys, 'path', list(sys.path)):
+            path.is_file.return_value = True
+            path.parent = '/fake/pyui'
+            with self.assertRaisesRegex(RuntimeError, 'No CRTC'):
+                native_menu.main()
+        runtime.main.assert_not_called()
+
     def run_menu(self, actions, initial=None):
         settings = dict(DEFAULT if initial is None else initial)
         views = []
@@ -86,7 +125,7 @@ class MenuTests(unittest.TestCase):
         self.assertEqual(views[2]['options'][1].value_text, '<    55%    >')
         self.assertEqual(views[3]['options'][2].value_text, '<    45%    >')
         self.assertEqual([o.primary_text for o in views[0]['options']],
-                         ['Warm light', 'Intensity', 'Orange tone', 'APPLY & RETURN', 'CANCEL'])
+                         ['Warm light', 'Intensity', 'Orange tone', 'Apply & Exit', 'Discard & Exit'])
         self.assertEqual([v['selected_index'] for v in views], [0, 0, 1, 2])
 
     def test_a_on_percentage_does_not_open_a_submenu_or_change_value(self):
@@ -120,10 +159,10 @@ class MenuTests(unittest.TestCase):
             events = []
             runtime = module('mainui')
             runtime.main = lambda: runtime.check_for_option_list_file(None)
-            display = SimpleNamespace(deinit_display=lambda: events.append('close'))
+            sdl = module('sdl2', SDL_Quit=lambda: events.append('close'))
             with patch.dict(sys.modules, {
                 'mainui': runtime,
-                'display.display': module('display.display', Display=display),
+                'sdl2': sdl,
             }), patch.object(native_menu, 'MAIN_PY') as path, \
                     patch.object(native_menu, 'load_settings', return_value=dict(DEFAULT)), \
                     patch.object(native_menu, 'discover_crtc', return_value=(1, 2, 1024)), \
@@ -140,10 +179,10 @@ class MenuTests(unittest.TestCase):
     def test_failure_still_releases_display_without_applying(self):
         runtime = module('mainui')
         runtime.main = lambda: runtime.check_for_option_list_file(None)
-        display = SimpleNamespace(deinit_display=Mock())
+        sdl = module('sdl2', SDL_Quit=Mock())
         with patch.dict(sys.modules, {
             'mainui': runtime,
-            'display.display': module('display.display', Display=display),
+            'sdl2': sdl,
         }), patch.object(native_menu, 'MAIN_PY') as path, \
                 patch.object(native_menu, 'load_settings', return_value=dict(DEFAULT)), \
                 patch.object(native_menu, 'discover_crtc', return_value=(1, 2, 1024)), \
@@ -154,8 +193,34 @@ class MenuTests(unittest.TestCase):
             path.parent = '/fake/pyui'
             with self.assertRaisesRegex(RuntimeError, 'UI failed'):
                 native_menu.main()
-            display.deinit_display.assert_called_once()
+            sdl.SDL_Quit.assert_called_once()
             apply.assert_not_called()
+
+    def test_success_flushes_logs_before_fast_process_exit(self):
+        events = []
+        with patch.object(native_menu, 'main', side_effect=SystemExit(0)), \
+                patch.object(sys, 'stdout', SimpleNamespace(flush=lambda: events.append('stdout'))), \
+                patch.object(sys, 'stderr', SimpleNamespace(flush=lambda: events.append('stderr'))), \
+                patch.object(native_menu.os, '_exit', side_effect=lambda code: events.append(('exit', code))):
+            native_menu.run()
+        self.assertEqual(events, ['stdout', 'stderr', ('exit', 0)])
+
+    def test_failure_keeps_error_status_and_does_not_fast_exit_successfully(self):
+        with patch.object(native_menu, 'main', side_effect=RuntimeError('Apply failed')), \
+                patch.object(native_menu.traceback, 'print_exc'), \
+                patch.object(native_menu.os, '_exit') as fast_exit:
+            with self.assertRaises(SystemExit) as result:
+                native_menu.run()
+            self.assertEqual(result.exception.code, 1)
+            fast_exit.assert_not_called()
+
+    def test_nonzero_exit_is_preserved(self):
+        with patch.object(native_menu, 'main', side_effect=SystemExit(2)), \
+                patch.object(native_menu.os, '_exit') as fast_exit:
+            with self.assertRaises(SystemExit) as result:
+                native_menu.run()
+            self.assertEqual(result.exception.code, 2)
+            fast_exit.assert_not_called()
 
 
 if __name__ == '__main__':
