@@ -1,0 +1,9 @@
+{
+  "label": "Night Light",
+  "icon": "sunset.png",
+  "launch": "launch.sh",
+  "description": "Warm screen filter",
+  "devices": ["MIYOO_FLIP"],
+  "hide": false,
+  "hideInSimpleMode": false
+}
