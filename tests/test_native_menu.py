@@ -14,8 +14,8 @@ def module(name, **attributes):
 
 
 class MenuTests(unittest.TestCase):
-    def run_menu(self, actions, submenu_values=()):
-        settings = dict(DEFAULT)
+    def run_menu(self, actions, initial=None):
+        settings = dict(DEFAULT if initial is None else initial)
         views = []
         actions = iter(actions)
         created = []
@@ -28,6 +28,8 @@ class MenuTests(unittest.TestCase):
                 state['options'] = options
 
             def get_selection(buttons):
+                self.assertIn('LEFT', buttons)
+                self.assertIn('RIGHT', buttons)
                 views.append(dict(state))
                 index, button = next(actions)
                 if index is not None:
@@ -48,57 +50,70 @@ class MenuTests(unittest.TestCase):
         def entry(**kwargs):
             return SimpleNamespace(**kwargs, get_value=lambda: kwargs['value'])
 
-        submenu = Mock(side_effect=submenu_values)
         modules = {
             'controller.controller_inputs': module('controller.controller_inputs',
-                                                   ControllerInput=SimpleNamespace(A='A', B='B')),
-            'option_select_ui': module('option_select_ui', OptionSelectUI=SimpleNamespace(navigate_menu=submenu)),
+                                                   ControllerInput=SimpleNamespace(A='A', B='B', DPAD_LEFT='LEFT', DPAD_RIGHT='RIGHT')),
             'views.grid_or_list_entry': module('views.grid_or_list_entry', GridOrListEntry=entry),
             'views.view_creator': module('views.view_creator', ViewCreator=SimpleNamespace(create_view=create_view)),
-            'views.view_type': module('views.view_type', ViewType=SimpleNamespace(TEXT_AND_IMAGE=1)),
+            'views.view_type': module('views.view_type', ViewType=SimpleNamespace(ICON_AND_DESC=1)),
         }
         with patch.dict(sys.modules, modules):
             result = native_menu.edit_settings(settings)
         self.assertEqual(len(created), 1, 'Keep the same view across input cycles')
-        return result, settings, views, submenu
+        return result, settings, views
 
     def test_arrows_and_idle_frames_preserve_highlight(self):
-        result, settings, views, submenu = self.run_menu([
+        result, settings, views = self.run_menu([
             (None, 'DOWN'), (None, 'DOWN'), (None, None),
-            (None, 'UP'), (None, 'A'),  # Choose intensity, then return to it.
+            (None, 'UP'), (None, 'RIGHT'),
             (None, None), (None, 'DOWN'), (None, 'DOWN'), (None, 'A'),
-        ], ['75'])
+        ])
         self.assertTrue(result)
-        self.assertEqual(settings, dict(DEFAULT, intensity=75))
+        self.assertEqual(settings, dict(DEFAULT, intensity=55))
         self.assertEqual([v['selected_index'] for v in views], [0, 1, 2, 2, 1, 1, 1, 2, 3])
-        self.assertEqual(submenu.call_count, 1)
 
     def test_up_wraps_to_cancel(self):
-        result, _, views, _ = self.run_menu([(None, 'UP'), (None, 'A')])
+        result, _, views = self.run_menu([(None, 'UP'), (None, 'A')])
         self.assertFalse(result)
         self.assertEqual(views[-1]['selected_index'], 4)
 
     def test_edits_stay_in_menu_until_apply(self):
-        result, settings, views, submenu = self.run_menu(
-            [(0, 'A'), (1, 'A'), (2, 'A'), (3, 'A')], ['75', '20'])
+        result, settings, views = self.run_menu(
+            [(0, 'A'), (1, 'RIGHT'), (2, 'LEFT'), (3, 'A')])
         self.assertTrue(result)
-        self.assertEqual(settings, dict(enabled=True, intensity=75, amber=20))
-        self.assertEqual(views[1]['options'][0].primary_text, 'Warm light: ON')
-        self.assertEqual(views[2]['options'][1].primary_text, 'Intensity: 75%')
-        self.assertEqual(views[3]['options'][2].primary_text, 'Orange tone: 20%')
+        self.assertEqual(settings, dict(enabled=True, intensity=55, amber=45))
+        self.assertEqual(views[1]['options'][0].value_text, '< ON >')
+        self.assertEqual(views[2]['options'][1].value_text, '< 55% >')
+        self.assertEqual(views[3]['options'][2].value_text, '< 45% >')
+        self.assertEqual([o.primary_text for o in views[0]['options']],
+                         ['Warm light', 'Intensity', 'Orange tone', 'APPLY & RETURN', 'CANCEL'])
         self.assertEqual([v['selected_index'] for v in views], [0, 0, 1, 2])
-        for call in submenu.call_args_list:
-            self.assertFalse(call.kwargs['exit_after_running'])
 
-    def test_back_from_submenu_keeps_value(self):
-        result, settings, _, _ = self.run_menu([(1, 'A'), (3, 'A')], [None])
+    def test_a_on_percentage_does_not_open_a_submenu_or_change_value(self):
+        result, settings, _ = self.run_menu([(1, 'A'), (2, 'A'), (3, 'A')])
         self.assertTrue(result)
         self.assertEqual(settings, DEFAULT)
 
     def test_cancel_and_root_back_discard_edits(self):
         for action in [(4, 'A'), (0, 'B')]:
-            result, _, _, _ = self.run_menu([(0, 'A'), action])
+            result, _, _ = self.run_menu([(0, 'A'), action])
             self.assertFalse(result)
+
+    def test_percentages_stop_at_bounds(self):
+        for initial, button, expected in [(98, 'RIGHT', 100), (100, 'RIGHT', 100),
+                                           (2, 'LEFT', 0), (0, 'LEFT', 0)]:
+            result, settings, _ = self.run_menu(
+                [(1, button), (2, button), (3, 'A')],
+                dict(DEFAULT, intensity=initial, amber=initial))
+            self.assertTrue(result)
+            self.assertEqual(settings['intensity'], expected)
+            self.assertEqual(settings['amber'], expected)
+
+    def test_arrows_toggle_filter_but_do_not_activate_exit_rows(self):
+        result, settings, _ = self.run_menu([
+            (0, 'RIGHT'), (0, 'LEFT'), (3, 'RIGHT'), (4, 'LEFT'), (3, 'A')])
+        self.assertTrue(result)
+        self.assertFalse(settings['enabled'])
 
     def test_display_closes_before_apply_and_cancel_never_applies(self):
         for should_apply in [True, False]:

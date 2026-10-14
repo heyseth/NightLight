@@ -11,24 +11,12 @@ from pathlib import Path
 
 from nightlight_core import load_settings, discover_crtc, apply
 
-APP = Path('/mnt/SDCARD/App/NightLight')
 MAIN_PY = Path('/mnt/SDCARD/App/PyUI/main-ui/mainui.py')
-
-
-def value_menu(settings, key):
-    rows = {}
-    for amount in range(0, 101, 5):
-        filled = amount // 10
-        bar = '[' + '=' * filled + '-' * (10 - filled) + ']'
-        mark = '* ' if amount == settings[key] else '  '
-        rows['{}{:3d}% {}'.format(mark, amount, bar)] = str(amount)
-    return rows
 
 
 def edit_settings(settings):
     # Import after mainui has configured the device, theme and display.
     from controller.controller_inputs import ControllerInput
-    from option_select_ui import OptionSelectUI
     from views.grid_or_list_entry import GridOrListEntry
     from views.view_creator import ViewCreator
     from views.view_type import ViewType
@@ -37,51 +25,47 @@ def edit_settings(settings):
     view = None
     while True:
         rows = [
-            ('Warm light: ' + ('ON' if settings['enabled'] else 'OFF'),
-             'TOGGLE', 'Press A to toggle the filter'),
-            ('Intensity: {}%'.format(settings['intensity']),
-             'intensity', 'Select the desired warmth level'),
-            ('Orange tone: {}%'.format(settings['amber']),
-             'amber', 'Select how amber the colour becomes'),
-            ('APPLY & RETURN', 'APPLY', 'Save and apply your chosen settings'),
-            ('CANCEL', 'CANCEL', 'Leave without changes'),
+            ('Warm light', 'TOGGLE', '< {} >'.format('ON' if settings['enabled'] else 'OFF')),
+            ('Intensity', 'intensity', '< {}% >'.format(settings['intensity'])),
+            ('Orange tone', 'amber', '< {}% >'.format(settings['amber'])),
+            ('APPLY & RETURN', 'APPLY', None),
+            ('CANCEL', 'CANCEL', None),
         ]
         options = [GridOrListEntry(primary_text=label, value=token,
-                                   image_path=str(APP / 'sunset.png'),
-                                   description=description)
-                   for label, token, description in rows]
+                                   value_text=value_text)
+                   for label, token, value_text in rows]
         # PyUI returns after each input cycle, including navigation and idle
         # frames. Keep its view alive so its highlight/scroll state survives.
         # This matches BasicSettingsMenu.show_menu in SpruceOS.
         if view is None:
             view = ViewCreator.create_view(
-                view_type=ViewType.TEXT_AND_IMAGE,
+                # Spruce's settings renderer uses the full screen width,
+                # with static labels and a separate right-aligned value.
+                view_type=ViewType.ICON_AND_DESC,
                 top_bar_text='NIGHT LIGHT', options=options,
                 selected_index=selected_index)
         else:
             view.set_options(options)
-        selected = view.get_selection([ControllerInput.A, ControllerInput.B])
+        selected = view.get_selection([ControllerInput.A, ControllerInput.B,
+                                       ControllerInput.DPAD_LEFT, ControllerInput.DPAD_RIGHT])
         if selected is None:
             continue
-        if selected.get_input() == ControllerInput.B:
+        button = selected.get_input()
+        if button == ControllerInput.B:
             return False
-        if selected.get_input() != ControllerInput.A:
+        if button not in (ControllerInput.A, ControllerInput.DPAD_LEFT, ControllerInput.DPAD_RIGHT):
             continue
         selected_index = selected.get_index()
         choice = selected.get_selection().get_value()
         if choice == 'TOGGLE':
             settings['enabled'] = not settings['enabled']
         elif choice in ('intensity', 'amber'):
-            value = OptionSelectUI.navigate_menu(
-                menu_dict=value_menu(settings, choice),
-                title=rows[selected_index][0], folder=str(APP),
-                exit_after_running=False, view_type=ViewType.TEXT_AND_IMAGE,
-                is_root=False)
-            if value is not None:
-                settings[choice] = int(value)
-        elif choice == 'APPLY':
+            if button in (ControllerInput.DPAD_LEFT, ControllerInput.DPAD_RIGHT):
+                step = -5 if button == ControllerInput.DPAD_LEFT else 5
+                settings[choice] = max(0, min(100, settings[choice] + step))
+        elif choice == 'APPLY' and button == ControllerInput.A:
             return True
-        elif choice == 'CANCEL':
+        elif choice == 'CANCEL' and button == ControllerInput.A:
             return False
 
 
