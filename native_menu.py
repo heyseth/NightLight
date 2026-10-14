@@ -25,9 +25,9 @@ def edit_settings(settings):
     view = None
     while True:
         rows = [
-            ('Warm light', 'TOGGLE', '< {} >'.format('ON' if settings['enabled'] else 'OFF')),
-            ('Intensity', 'intensity', '< {}% >'.format(settings['intensity'])),
-            ('Orange tone', 'amber', '< {}% >'.format(settings['amber'])),
+            ('Warm light', 'TOGGLE', '<    {}    >'.format('ON' if settings['enabled'] else 'OFF')),
+            ('Intensity', 'intensity', '<    {}%    >'.format(settings['intensity'])),
+            ('Orange tone', 'amber', '<    {}%    >'.format(settings['amber'])),
             ('APPLY & RETURN', 'APPLY', None),
             ('CANCEL', 'CANCEL', None),
         ]

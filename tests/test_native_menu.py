@@ -82,9 +82,9 @@ class MenuTests(unittest.TestCase):
             [(0, 'A'), (1, 'RIGHT'), (2, 'LEFT'), (3, 'A')])
         self.assertTrue(result)
         self.assertEqual(settings, dict(enabled=True, intensity=55, amber=45))
-        self.assertEqual(views[1]['options'][0].value_text, '< ON >')
-        self.assertEqual(views[2]['options'][1].value_text, '< 55% >')
-        self.assertEqual(views[3]['options'][2].value_text, '< 45% >')
+        self.assertEqual(views[1]['options'][0].value_text, '<    ON    >')
+        self.assertEqual(views[2]['options'][1].value_text, '<    55%    >')
+        self.assertEqual(views[3]['options'][2].value_text, '<    45%    >')
         self.assertEqual([o.primary_text for o in views[0]['options']],
                          ['Warm light', 'Intensity', 'Orange tone', 'APPLY & RETURN', 'CANCEL'])
         self.assertEqual([v['selected_index'] for v in views], [0, 0, 1, 2])
