@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Night Light UI using SpruceOS's own PyUI option-list renderer.
+"""Persistent Night Light settings using the installed SpruceOS PyUI views.
 
-No SDL window is created by this app. Each selection is made by starting
-Spruce's own MainUI in -optionListFile mode and letting it exit after a safe
-one-line shell command records the selection. No SpruceOS files are edited.
+Run with Spruce's MainUI runtime, just like its mainui.py entrypoint. Only
+this process is customized; no installed SpruceOS files are changed.
 """
-import json
-import os
-import shlex
-import subprocess
 import sys
 import time
 import traceback
@@ -17,149 +12,112 @@ from pathlib import Path
 from nightlight_core import load_settings, discover_crtc, apply
 
 APP = Path('/mnt/SDCARD/App/NightLight')
-MENU = APP / 'nightlight-options.json'
-CHOICE = APP / 'nightlight-choice.txt'
-# PyUI writes EXIT here when the user presses B on the root menu.
-PYUI_EXIT = Path('/mnt/SDCARD/App/PyUI/selection.txt')
-MAINUI = '/mnt/SDCARD/spruce/flip/bin/MainUI'
-MAIN_PY = '/mnt/SDCARD/App/PyUI/main-ui/mainui.py'
-CFG = '/mnt/SDCARD/App/PyUI/py-ui-config.json'
+MAIN_PY = Path('/mnt/SDCARD/App/PyUI/main-ui/mainui.py')
 
 
-def command(token):
-    # Values in -optionListFile are shell commands: PyUI releases DRM master,
-    # runs the command and exits automatically (see OptionSelectUI.run_action).
-    return "printf '%s\\n' " + shlex.quote(token) + " > " + shlex.quote(str(CHOICE))
-
-
-def menu_data(settings):
-    state = 'ON' if settings['enabled'] else 'OFF'
+def value_menu(settings, key):
     rows = {}
-    rows['Warm light: ' + state] = command('TOGGLE')
-    for key, name in [('intensity', 'Intensity'), ('amber', 'Orange tone')]:
-        head = '{}: {}%'.format(name, settings[key])
-        for amount in range(0, 101, 5):
-            # Indicate the current value and show a textual slider as a preview.
-            filled = amount // 10
-            bar = '[' + '=' * filled + '-' * (10 - filled) + ']'
-            mark = '* ' if amount == settings[key] else '  '
-            label = '{}{:3d}% {}'.format(mark, amount, bar)
-            rows[head + '/' + label] = command(key.upper() + '=' + str(amount))
-    rows['APPLY & RETURN'] = command('APPLY')
-    rows['CANCEL'] = command('CANCEL')
-    rows['descriptions'] = {
-        'Warm light: ' + state: 'Press A to toggle the filter',
-        'Intensity: {}%'.format(settings['intensity']): 'Select the desired warmth level',
-        'Orange tone: {}%'.format(settings['amber']): 'Select how amber the colour becomes',
-        'APPLY & RETURN': 'Save and apply your chosen settings',
-        'CANCEL': 'Leave without changes',
-    }
+    for amount in range(0, 101, 5):
+        filled = amount // 10
+        bar = '[' + '=' * filled + '-' * (10 - filled) + ']'
+        mark = '* ' if amount == settings[key] else '  '
+        rows['{}{:3d}% {}'.format(mark, amount, bar)] = str(amount)
     return rows
 
 
-def atomic_write_json(path, obj):
-    temp = str(path) + '.tmp'
-    with open(temp, 'w', encoding='utf-8') as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-        f.write('\n')
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temp, path)
+def edit_settings(settings):
+    # Import after mainui has configured the device, theme and display.
+    from controller.controller_inputs import ControllerInput
+    from option_select_ui import OptionSelectUI
+    from views.grid_or_list_entry import GridOrListEntry
+    from views.view_creator import ViewCreator
+    from views.view_type import ViewType
 
-
-def get_selection(settings):
-    # Reset selection markers; the original PyUI has already exited when our
-    # launcher is called, so nothing else should be using this output path.
-    for path in (CHOICE, PYUI_EXIT):
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-    atomic_write_json(MENU, menu_data(settings))
-    args = [MAINUI, MAIN_PY,
-            '-device', 'MIYOO_FLIP',
-            '-logDir', '/mnt/SDCARD/Saves/spruce',
-            '-pyUiConfig', CFG,
-            '-cfwConfig', '/mnt/SDCARD/Saves/spruce/spruce-config.json',
-            '-optionListFile', str(MENU),
-            '-optionListTitle', 'NIGHT LIGHT']
-    print('Opening SpruceOS native option menu...', flush=True)
-    p = subprocess.Popen(args, cwd='/usr/miyoo/bin')
-    started = time.monotonic()
-    chosen = None
-    try:
-        while time.monotonic() - started < 180:
-            if CHOICE.is_file():
-                chosen = CHOICE.read_text(encoding='utf-8').strip()
-                if chosen:
-                    break
-            # PyUI writes this marker if B exits the root menu rather than
-            # selecting CANCEL. It does not automatically exit in that case.
-            if PYUI_EXIT.is_file():
-                if PYUI_EXIT.read_text(encoding='utf-8').strip() == 'EXIT':
-                    chosen = 'CANCEL'
-                    break
-            if p.poll() is not None:
-                # The command may have written a selection at the last instant.
-                if CHOICE.is_file():
-                    chosen = CHOICE.read_text(encoding='utf-8').strip()
-                else:
-                    print('Native menu exited early with code: %s' % p.returncode, flush=True)
-                break
-            time.sleep(.15)
-    finally:
-        if p.poll() is None:
-            p.terminate()  # Only our OWN temporary menu subprocess.
-            try:
-                p.wait(timeout=4)
-            except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait(timeout=3)
-        for path in (CHOICE, PYUI_EXIT):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-    if not chosen:
-        print('Menu timed out or failed, no changes applied', flush=True)
-        return 'CANCEL'
-    print('Menu selected: %s' % chosen, flush=True)
-    return chosen
+    selected_index = 0
+    view = None
+    while True:
+        rows = [
+            ('Warm light: ' + ('ON' if settings['enabled'] else 'OFF'),
+             'TOGGLE', 'Press A to toggle the filter'),
+            ('Intensity: {}%'.format(settings['intensity']),
+             'intensity', 'Select the desired warmth level'),
+            ('Orange tone: {}%'.format(settings['amber']),
+             'amber', 'Select how amber the colour becomes'),
+            ('APPLY & RETURN', 'APPLY', 'Save and apply your chosen settings'),
+            ('CANCEL', 'CANCEL', 'Leave without changes'),
+        ]
+        options = [GridOrListEntry(primary_text=label, value=token,
+                                   image_path=str(APP / 'sunset.png'),
+                                   description=description)
+                   for label, token, description in rows]
+        # PyUI returns after each input cycle, including navigation and idle
+        # frames. Keep its view alive so its highlight/scroll state survives.
+        # This matches BasicSettingsMenu.show_menu in SpruceOS.
+        if view is None:
+            view = ViewCreator.create_view(
+                view_type=ViewType.TEXT_AND_IMAGE,
+                top_bar_text='NIGHT LIGHT', options=options,
+                selected_index=selected_index)
+        else:
+            view.set_options(options)
+        selected = view.get_selection([ControllerInput.A, ControllerInput.B])
+        if selected is None:
+            continue
+        if selected.get_input() == ControllerInput.B:
+            return False
+        if selected.get_input() != ControllerInput.A:
+            continue
+        selected_index = selected.get_index()
+        choice = selected.get_selection().get_value()
+        if choice == 'TOGGLE':
+            settings['enabled'] = not settings['enabled']
+        elif choice in ('intensity', 'amber'):
+            value = OptionSelectUI.navigate_menu(
+                menu_dict=value_menu(settings, choice),
+                title=rows[selected_index][0], folder=str(APP),
+                exit_after_running=False, view_type=ViewType.TEXT_AND_IMAGE,
+                is_root=False)
+            if value is not None:
+                settings[choice] = int(value)
+        elif choice == 'APPLY':
+            return True
+        elif choice == 'CANCEL':
+            return False
 
 
 def main():
-    if not Path(MAINUI).is_file() or not Path(MAIN_PY).is_file():
-        raise RuntimeError('Cannot locate the SpruceOS MainUI launcher/entrypoint')
+    if not MAIN_PY.is_file():
+        raise RuntimeError('Cannot locate the SpruceOS PyUI entrypoint')
+    started = time.monotonic()
     settings = load_settings()
-    print('Night Light native menu settings: %s' % settings, flush=True)
-    # Do not scan CRTC while a temporary menu holds DRM master.
+    # Capture the active framebuffer before SDL starts. Its IDs remain valid
+    # after SDL closes, even if shutdown temporarily leaves no active FB.
     crtc = discover_crtc()
-    print('Active CRTC: %r' % (crtc,), flush=True)
-    for _ in range(60):
-        choice = get_selection(settings)
-        if choice == 'TOGGLE':
-            settings['enabled'] = not settings['enabled']
-        elif choice.startswith('INTENSITY=') or choice.startswith('AMBER='):
-            name, value = choice.split('=', 1)
-            try:
-                val = int(value)
-                if val % 5 != 0 or not 0 <= val <= 100:
-                    raise ValueError('Out of range')
-                settings[name.lower()] = val
-            except ValueError:
-                raise RuntimeError('Invalid value: ' + choice)
-        elif choice == 'APPLY':
-            # The menu process must be fully terminated before we open DRM.
-            time.sleep(.3)
+    print('Active CRTC: %r (%.2fs)' % (crtc, time.monotonic() - started), flush=True)
+    sys.path.insert(0, str(MAIN_PY.parent))
+    import mainui
+    from display.display import Display
+
+    def show_nightlight(args):
+        print('Night Light menu ready (%.2fs)' % (time.monotonic() - started), flush=True)
+        try:
+            should_apply = edit_settings(settings)
+        finally:
+            # Release DRM master once, when leaving the menu, never on edits.
+            Display.deinit_display()
+        if should_apply:
             apply(settings, crtc)
             print('SUCCESS: new Night Light settings applied', flush=True)
-            return
-        elif choice == 'CANCEL':
-            print('Cancelled; original saved settings unchanged', flush=True)
-            return
         else:
-            raise RuntimeError('Invalid menu command: ' + choice)
-    print('Exiting after 60 selections (safety cap)', flush=True)
+            print('Cancelled; original saved settings unchanged', flush=True)
+        # Do not fall through into Spruce's full main menu/startup tasks.
+        raise SystemExit(0)
+
+    # Reuse Spruce's installed initialization and native views in this process.
+    # The option-list flag selects auxiliary mode; our hook owns the menu and
+    # does not read an option-list file or execute shell commands for selections.
+    mainui.check_for_option_list_file = show_nightlight
+    mainui.main()
 
 
 if __name__ == '__main__':
